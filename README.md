@@ -247,6 +247,8 @@ Every generated file is normalized to `16 kHz / mono / 16-bit PCM WAV` and rejec
 
 Qwen3-TTS generates 16 samples per batch by default. On an RTX 3090 that is about 2.7× faster per sample than batches of 4 for under 1 GB more VRAM. Set `-e QWEN_BATCH_SIZE=<n>` to change it: lower it on GPUs with less memory, or try `32` (about 6 GB) for more speed. A batch that fails is retried one sample at a time.
 
+MOSS-TTS-Nano generates one clip at a time, so with more than one GPU it runs one worker per GPU (about 2.3× faster on two RTX 3090s). Set `-e MOSS_GPUS=1` to keep it on a single GPU. It also stops generating a clip once it passes the rejection length, instead of finishing clips that would be discarded anyway.
+
 ---
 
 ## Dataset Behavior

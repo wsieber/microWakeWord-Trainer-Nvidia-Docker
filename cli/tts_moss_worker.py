@@ -5,6 +5,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import torch
@@ -17,6 +21,24 @@ from moss_tts_nano.defaults import (
 
 
 MOSS_AUDIO_TOKENIZER_TYPE = "moss-audio-tokenizer-nano"
+# The nano audio tokenizer emits 48000 / 3840 = 12.5 frames per second.
+MOSS_FRAMES_PER_SECOND = 12.5
+MOSS_MAX_NEW_FRAMES = 64
+
+
+def max_new_frames(item: dict) -> int:
+    """Stop decoding just past the clip's rejection length.
+
+    Reference QA rejects anything longer than maximum_duration, so frames
+    beyond it are wasted work; clips that finish earlier are unaffected.
+    """
+
+    try:
+        maximum_duration = float(item["maximum_duration"])
+    except (KeyError, TypeError, ValueError):
+        return MOSS_MAX_NEW_FRAMES
+    frames = math.ceil(maximum_duration * MOSS_FRAMES_PER_SECOND) + 2
+    return max(1, min(MOSS_MAX_NEW_FRAMES, frames))
 
 
 def read_jsonl(path: Path) -> list[dict]:
@@ -26,6 +48,67 @@ def read_jsonl(path: Path) -> list[dict]:
         if line:
             entries.append(json.loads(line))
     return entries
+
+
+def visible_gpus() -> list[str]:
+    configured = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if configured is not None:
+        return [gpu.strip() for gpu in configured.split(",") if gpu.strip()]
+    if not torch.cuda.is_available():
+        return []
+    return [str(index) for index in range(torch.cuda.device_count())]
+
+
+def worker_gpus(entry_count: int) -> list[str]:
+    """GPUs to split generation across; MOSS_GPUS caps the count.
+
+    MOSS decodes one clip at a time and a single worker already keeps a GPU
+    busy, so extra workers only help when each gets its own GPU.
+    """
+
+    gpus = visible_gpus()
+    try:
+        limit = int(os.environ.get("MOSS_GPUS", len(gpus)))
+    except ValueError:
+        limit = len(gpus)
+    return gpus[: max(1, min(limit, entry_count))]
+
+
+def run_sharded(args: argparse.Namespace, entries: list[dict], gpus: list[str]) -> int:
+    """Run one worker per GPU, each on a round-robin share of the entries."""
+
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    processes = []
+    shard_paths = []
+    for index, gpu in enumerate(gpus):
+        shard_path = args.output_dir / f".moss_shard_{index}.jsonl"
+        shard_path.write_text(
+            "".join(json.dumps(entry, ensure_ascii=False) + "\n" for entry in entries[index :: len(gpus)]),
+            encoding="utf-8",
+        )
+        shard_paths.append(shard_path)
+        processes.append(
+            subprocess.Popen(
+                [
+                    sys.executable,
+                    str(Path(__file__).resolve()),
+                    "--input-jsonl",
+                    str(shard_path),
+                    "--output-dir",
+                    str(args.output_dir),
+                    "--checkpoint",
+                    args.checkpoint,
+                    "--audio-tokenizer",
+                    args.audio_tokenizer,
+                ],
+                env={**os.environ, "CUDA_VISIBLE_DEVICES": gpu, "MOSS_GPUS": "1"},
+            )
+        )
+    print(f"MOSS generating {len(entries)} clip(s) across {len(gpus)} GPUs", flush=True)
+    returncodes = [process.wait() for process in processes]
+    for shard_path in shard_paths:
+        shard_path.unlink(missing_ok=True)
+    return next((code for code in returncodes if code != 0), 0)
 
 
 def main() -> int:
@@ -42,6 +125,10 @@ def main() -> int:
     entries = read_jsonl(args.input_jsonl)
     if not entries:
         return 0
+
+    gpus = worker_gpus(len(entries))
+    if len(gpus) > 1:
+        return run_sharded(args, entries, gpus)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type == "cuda":
@@ -76,7 +163,7 @@ def main() -> int:
             audio_tokenizer_pretrained_name_or_path=args.audio_tokenizer,
             device=device,
             nq=None,
-            max_new_frames=64,
+            max_new_frames=max_new_frames(item),
             voice_clone_max_text_tokens=32,
             voice_clone_max_memory_per_sample_gb=1.0,
             do_sample=True,

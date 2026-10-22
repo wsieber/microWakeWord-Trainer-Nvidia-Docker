@@ -802,6 +802,51 @@ class QwenBatchSizeTests(unittest.TestCase):
             self.assertEqual(generator_module.qwen_batch_size(100), 16)
 
 
+class MossWorkerSpeedTests(unittest.TestCase):
+    @staticmethod
+    def load_helpers(device_count: int) -> dict:
+        """Exec the worker's pure helpers without importing torch/MOSS."""
+
+        import math
+        import os
+        from types import SimpleNamespace
+
+        tree = ast.parse((REPO_ROOT / "cli" / "tts_moss_worker.py").read_text(encoding="utf-8"))
+        wanted = {"max_new_frames", "visible_gpus", "worker_gpus"}
+        nodes = [
+            node
+            for node in tree.body
+            if (isinstance(node, ast.FunctionDef) and node.name in wanted)
+            or (
+                isinstance(node, ast.Assign)
+                and any(getattr(t, "id", "").startswith("MOSS_") for t in node.targets)
+            )
+        ]
+        cuda = SimpleNamespace(is_available=lambda: device_count > 0, device_count=lambda: device_count)
+        namespace = {"math": math, "os": os, "torch": SimpleNamespace(cuda=cuda)}
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), "tts_moss_worker", "exec"), namespace)
+        return namespace
+
+    def test_max_new_frames_stops_just_past_rejection_length(self) -> None:
+        helpers = self.load_helpers(1)
+        self.assertEqual(helpers["max_new_frames"]({"maximum_duration": 2.718}), 36)
+        self.assertEqual(helpers["max_new_frames"]({"maximum_duration": 9.0}), 64)
+        self.assertEqual(helpers["max_new_frames"]({}), 64)
+
+    def test_worker_gpus_uses_each_gpu_once_and_honours_limit(self) -> None:
+        helpers = self.load_helpers(2)
+        with patch.dict("os.environ", {}, clear=False) as env:
+            env.pop("CUDA_VISIBLE_DEVICES", None)
+            env.pop("MOSS_GPUS", None)
+            self.assertEqual(helpers["worker_gpus"](100), ["0", "1"])
+            self.assertEqual(helpers["worker_gpus"](1), ["0"])
+            env["MOSS_GPUS"] = "1"
+            self.assertEqual(helpers["worker_gpus"](100), ["0"])
+            env.pop("MOSS_GPUS")
+            env["CUDA_VISIBLE_DEVICES"] = "1"
+            self.assertEqual(helpers["worker_gpus"](100), ["1"])
+
+
 class ModelCommandStopTests(unittest.TestCase):
     def test_trainer_stop_reaches_model_command_in_its_own_group(self) -> None:
         import os
