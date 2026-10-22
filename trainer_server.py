@@ -172,6 +172,7 @@ WAKE_PHRASE_GUIDANCE_MIN_SIMILARITY = 0.68
 AUTO_TRAIN_DEFAULT_CONFIG: Dict[str, Any] = {
     "enabled": False,
     "wake_phrase": "",
+    "tracked_wake_phrases": [],
     "language": DEFAULT_LANGUAGE,
     "english_accent": DEFAULT_SERVER_ENGLISH_ACCENT,
     "stt_engine": DEFAULT_STT_ENGINE,
@@ -805,6 +806,33 @@ def _stt_engine_catalog(language: Any = DEFAULT_LANGUAGE) -> List[Dict[str, Any]
     ]
 
 
+def _normalize_transcript_text(value: Any) -> str:
+    text = unicodedata.normalize("NFKC", str(value or "")).casefold().replace("_", " ")
+    text = re.sub(r"[^\w]+", " ", text, flags=re.UNICODE)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _normalize_tracked_wake_phrases(value: Any) -> List[str]:
+    if isinstance(value, str):
+        candidates = value.split(",")
+    elif isinstance(value, (list, tuple)):
+        candidates = list(value)
+    else:
+        candidates = []
+    seen: set[str] = set()
+    result: List[str] = []
+    for candidate in candidates:
+        phrase = str(candidate or "").strip()
+        if not phrase:
+            continue
+        key = _normalize_transcript_text(phrase)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(phrase)
+    return result
+
+
 def _normalize_auto_train_config(values: Dict[str, Any] | None, *, base: Dict[str, Any] | None = None) -> Dict[str, Any]:
     incoming = values if isinstance(values, dict) else {}
     source = {**AUTO_TRAIN_DEFAULT_CONFIG, **(base or {}), **incoming}
@@ -814,6 +842,7 @@ def _normalize_auto_train_config(values: Dict[str, Any] | None, *, base: Dict[st
     return {
         "enabled": _config_bool(source.get("enabled")),
         "wake_phrase": str(source.get("wake_phrase") or "").strip(),
+        "tracked_wake_phrases": _normalize_tracked_wake_phrases(source.get("tracked_wake_phrases")),
         "language": language,
         "english_accent": normalize_english_accent(
             source.get("english_accent"), language
@@ -1093,12 +1122,6 @@ def _unlink_tater() -> Dict[str, Any]:
         "remote_error": remote_error,
         **_tater_link_public_status(),
     }
-
-
-def _normalize_transcript_text(value: Any) -> str:
-    text = unicodedata.normalize("NFKC", str(value or "")).casefold().replace("_", " ")
-    text = re.sub(r"[^\w]+", " ", text, flags=re.UNICODE)
-    return re.sub(r"\s+", " ", text).strip()
 
 
 def _transcript_contains_wake_phrase(transcript: Any, wake_phrase: Any) -> bool:
@@ -1485,7 +1508,10 @@ def _auto_review_capture(file_name: str) -> None:
         if not config.get("enabled"):
             return
         wake_phrase = str(config.get("wake_phrase") or "").strip()
-        if not wake_phrase:
+        tracked_phrases = _normalize_tracked_wake_phrases(config.get("tracked_wake_phrases"))
+        if not tracked_phrases and wake_phrase:
+            tracked_phrases = [wake_phrase]
+        if not tracked_phrases:
             _record_auto_review_result(file_name=file_name, result="waiting_for_wake_phrase")
             return
 
@@ -1512,15 +1538,27 @@ def _auto_review_capture(file_name: str) -> None:
         if status or not _captured_event_is_auto_reviewable(metadata, config):
             return
         captured_wake_phrase = str(metadata.get("wake_word") or "").strip()
-        if captured_wake_phrase and _normalize_transcript_text(captured_wake_phrase) != _normalize_transcript_text(wake_phrase):
+        matched_phrase = next(
+            (
+                candidate
+                for candidate in tracked_phrases
+                if _normalize_transcript_text(candidate) == _normalize_transcript_text(captured_wake_phrase)
+            ),
+            None,
+        )
+        if captured_wake_phrase and matched_phrase is None:
+            tracked_list = ", ".join(f"'{p}'" for p in tracked_phrases)
             metadata["auto_review_status"] = "different_wake_phrase"
             metadata["auto_review_reason"] = (
-                f"Capture is for '{captured_wake_phrase}', not configured phrase '{wake_phrase}'; left for manual review."
+                f"Capture is for '{captured_wake_phrase}', which isn't in the tracked list ({tracked_list}); "
+                "left for manual review."
             )
             metadata["auto_reviewed_at"] = _iso_now()
             _write_sidecar_json(audio_path, metadata)
             _record_auto_review_result(file_name=file_name, result="different_wake_phrase")
             return
+        # Untagged captures (no wake_word metadata) fall back to the active training phrase.
+        wake_phrase = matched_phrase or wake_phrase or tracked_phrases[0]
 
         metadata["auto_review_status"] = "transcribing"
         metadata["auto_reviewed_at"] = _iso_now()
