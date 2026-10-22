@@ -28,6 +28,7 @@ DEFAULT_TTS_VOICE_COUNT=128
 : "${CLEANUP_WORK_DIR:=false}"
 : "${CLEANUP_ARCHIVES:=false}"
 : "${CLEANUP_INTERMEDIATE_FILES:=false}"
+: "${VOXPOPULI:=false}"
 : "${QUIET:=false}"
 : "${VERBOSE:=false}"
 

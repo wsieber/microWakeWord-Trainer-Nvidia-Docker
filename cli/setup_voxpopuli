@@ -1,0 +1,77 @@
+#!/bin/bash
+set -euo pipefail
+
+PROGPATH=$(realpath "$0")
+PROGDIR=$(dirname "${PROGPATH}")
+
+source "${PROGDIR}/shell.functions"
+
+if [ "${HELP}" == "true" ] ; then
+    cat <<EOF >&2
+Usage: $0 [ --data-dir=<data_dir> ]
+
+    Builds optional VoxPopuli English speech negatives when VOXPOPULI=true.
+    Shards are downloaded, converted to features and deleted one at a time,
+    so only one ~3.3 GB shard is on disk at once (~15 GB of features total).
+    Interrupted runs resume at the first unfinished shard.
+
+    <data_dir>            : Path to the data directory.
+                          :    Default: ${DATA_DIR}
+
+EOF
+    exit 1
+fi
+
+case "${VOXPOPULI,,}" in
+    1|true|yes|on) ;;
+    *)
+        echo "   VoxPopuli negatives disabled (set VOXPOPULI=true to enable)"
+        exit 0
+        ;;
+esac
+
+VOXPOPULI_URL="https://huggingface.co/datasets/facebook/voxpopuli/resolve/main/en"
+VOXPOPULI_SHARDS=30
+PYTHON="${DATA_DIR}/.venv/bin/python"
+MWW_DIR="${DATA_DIR}/tools/microWakeWord"
+
+mkdir -p "${DATA_DIR}/training_datasets/downloads" || :
+cd "${DATA_DIR}/training_datasets"
+
+OUT_DIR="./negative_datasets/voxpopuli/training"
+DONE_DIR="./negative_datasets/voxpopuli/.done"
+mkdir -p "${OUT_DIR}" "${DONE_DIR}"
+
+# Serialize concurrent runs (e.g. a manual download and a training run) so they
+# never write the same shard; a second run waits, then sees the shards done.
+exec 9> "./negative_datasets/voxpopuli/.lock"
+if ! flock -n 9 ; then
+    echo "   Another VoxPopuli setup is running; waiting for it to finish"
+    flock 9
+fi
+
+echo "===== Checking VoxPopuli negatives (${VOXPOPULI_SHARDS} English shards) ====="
+
+for (( i = 0 ; i < VOXPOPULI_SHARDS ; i++ )) ; do
+    shard=$(printf "train-%05d-of-%05d" "${i}" "${VOXPOPULI_SHARDS}")
+    mmap_dir="${OUT_DIR}/voxpopuli_en_${shard}_mmap"
+
+    if [ -f "${DONE_DIR}/${shard}" ] && [ -d "${mmap_dir}" ] ; then
+        continue
+    fi
+
+    parquet="./downloads/voxpopuli_en_${shard}.parquet"
+    echo "   [$((i + 1))/${VOXPOPULI_SHARDS}] Downloading ${shard}"
+    curl -sfL -C - --retry 5 --retry-delay 10 "${VOXPOPULI_URL}/${shard}.parquet" -o "${parquet}"
+
+    echo "   [$((i + 1))/${VOXPOPULI_SHARDS}] Generating features for ${shard}"
+    rm -rf "${mmap_dir}" "${mmap_dir}.partial"
+    PYTHONPATH="${MWW_DIR}${PYTHONPATH:+:${PYTHONPATH}}" "${PYTHON}" "${PROGDIR}/voxpopuli_features.py" \
+        --parquet="${parquet}" --out-dir="${mmap_dir}.partial"
+    mv "${mmap_dir}.partial" "${mmap_dir}"
+    touch "${DONE_DIR}/${shard}"
+
+    rm -f "${parquet}"
+done
+
+echo "   VoxPopuli negatives complete ($(du -sh "${OUT_DIR}" | cut -f1))"

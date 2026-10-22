@@ -260,6 +260,10 @@ The first training run downloads and prepares missing training assets into `/dat
 
 The three modern engines deliberately use separate environments under `/data/tts-envs/`; their required PyTorch and Transformers versions conflict with one another and with the trainer environment. Model weights can require many gigabytes, so allow extra disk space and time on the first run. After the assets are prepared, later runs reuse the local copies unless the mounted `/data` contents are deleted.
 
+### Optional VoxPopuli speech negatives
+
+Add `-e VOXPOPULI=true` to also build English speech negatives from [VoxPopuli](https://huggingface.co/datasets/facebook/voxpopuli) (about 520 hours of parliamentary speech). The 30 source shards total about 99 GB, but they are downloaded, converted to features, and deleted one at a time, so only one ~3.3 GB shard is on disk at once and about 12 GB of features remain in `/data/training_datasets/negative_datasets/voxpopuli`. The first run takes a few hours, mostly downloading; an interrupted run resumes at the first unfinished shard. Training uses the VoxPopuli features whenever they exist, alongside the four stock negative sets.
+
 ---
 
 ## Trained Wake Words

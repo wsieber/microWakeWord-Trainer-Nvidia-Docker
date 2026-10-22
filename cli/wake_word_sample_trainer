@@ -142,6 +142,16 @@ else
   echo "ℹ️  No reviewed negative features found at ${REVIEWED_NEGATIVE_FEATURES_DIR}/training (continuing with stock negatives)"
 fi
 
+# VoxPopuli speech negatives are optional (built by setup_voxpopuli when VOXPOPULI=true).
+VOXPOPULI_FEATURES_DIR="${TRAINING_DS}/negative_datasets/voxpopuli"
+HAS_VOXPOPULI="false"
+if compgen -G "${VOXPOPULI_FEATURES_DIR}/training/*_mmap" > /dev/null ; then
+  HAS_VOXPOPULI="true"
+  echo "✅ Found VoxPopuli negatives: ${VOXPOPULI_FEATURES_DIR}/training"
+else
+  echo "ℹ️  No VoxPopuli negatives found (set VOXPOPULI=true to download them)"
+fi
+
 cd "${WORK_DIR}"
 
 echo "===== Starting ${TRAINING_STEPS} training steps ====="
@@ -165,6 +175,7 @@ features:
   type: mmap
 __PERSONAL_FEATURE_MARKER__
 __REVIEWED_NEGATIVE_FEATURE_MARKER__
+__VOXPOPULI_FEATURE_MARKER__
 - features_dir: __NEG_SPEECH__
   penalty_weight: 1.0
   sampling_weight: 12.0
@@ -254,6 +265,22 @@ EOF
   perl -0777 -i -pe "s#__REVIEWED_NEGATIVE_FEATURE_MARKER__#${reviewed_negative_block}#g" "${YAML_PATH}"
 else
   sed -i -e "/__REVIEWED_NEGATIVE_FEATURE_MARKER__/d" "${YAML_PATH}"
+fi
+
+# Insert/remove VoxPopuli speech-negative block
+if [ "${HAS_VOXPOPULI}" = "true" ]; then
+  voxpopuli_block="$(cat <<EOF
+- features_dir: ${VOXPOPULI_FEATURES_DIR}
+  penalty_weight: 1.0
+  sampling_weight: 8.0
+  truncation_strategy: random
+  truth: false
+  type: mmap
+EOF
+)"
+  perl -0777 -i -pe "s#__VOXPOPULI_FEATURE_MARKER__#${voxpopuli_block}#g" "${YAML_PATH}"
+else
+  sed -i -e "/__VOXPOPULI_FEATURE_MARKER__/d" "${YAML_PATH}"
 fi
 
 echo "   Wrote training_parameters.yaml"
