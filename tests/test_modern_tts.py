@@ -788,5 +788,68 @@ class ModernTtsTests(unittest.TestCase):
         self.assertIn("OmniVoice", store)
 
 
+class QwenBatchSizeTests(unittest.TestCase):
+    def test_qwen_batch_size_defaults_and_overrides(self) -> None:
+        with patch.dict("os.environ", {}, clear=False) as env:
+            env.pop("QWEN_BATCH_SIZE", None)
+            self.assertEqual(generator_module.qwen_batch_size(100), 16)
+            self.assertEqual(generator_module.qwen_batch_size(8), 8)
+            env["QWEN_BATCH_SIZE"] = "32"
+            self.assertEqual(generator_module.qwen_batch_size(100), 32)
+            env["QWEN_BATCH_SIZE"] = "0"
+            self.assertEqual(generator_module.qwen_batch_size(100), 1)
+            env["QWEN_BATCH_SIZE"] = "lots"
+            self.assertEqual(generator_module.qwen_batch_size(100), 16)
+
+
+class ModelCommandStopTests(unittest.TestCase):
+    def test_trainer_stop_reaches_model_command_in_its_own_group(self) -> None:
+        import os
+        import sys
+        import time
+
+        orchestrator = (
+            "import importlib.util, signal, sys\n"
+            f"spec = importlib.util.spec_from_file_location('gen', {str(GENERATOR_PATH)!r})\n"
+            "gen = importlib.util.module_from_spec(spec); spec.loader.exec_module(gen)\n"
+            "for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):\n"
+            "    signal.signal(s, gen.forward_stop_to_model_groups)\n"
+            "gen.run([sys.executable, '-c', "
+            "'import os, time; print(os.getpid(), flush=True); time.sleep(60)'])\n"
+        )
+        # The trainer runs generation in a new session and stops it with killpg.
+        proc = subprocess.Popen(
+            [sys.executable, "-c", orchestrator],
+            cwd=REPO_ROOT,
+            stdout=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        assert proc.stdout is not None
+        line = proc.stdout.readline()
+        while line.startswith("→"):  # run() logs the command before starting it
+            line = proc.stdout.readline()
+        worker_pid = int(line)
+        self.assertNotEqual(os.getpgid(worker_pid), os.getpgid(proc.pid))
+
+        os.killpg(proc.pid, signal.SIGTERM)
+        proc.wait(timeout=10)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            try:
+                os.kill(worker_pid, 0)
+            except ProcessLookupError:
+                break
+            # The orphaned worker is reparented to PID 1, which may never reap
+            # it; an exited-but-unreaped (zombie) worker has still stopped.
+            stat_path = Path(f"/proc/{worker_pid}/stat")
+            if stat_path.exists() and stat_path.read_text().rsplit(")", 1)[1].split()[0] == "Z":
+                break
+            time.sleep(0.1)
+        else:
+            os.kill(worker_pid, signal.SIGKILL)
+            self.fail("model command survived the trainer stop")
+
+
 if __name__ == "__main__":
     unittest.main()

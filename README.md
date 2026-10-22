@@ -245,6 +245,8 @@ Qwen, OmniVoice, and Piper now generate final corpus candidates directly instead
 
 Every generated file is normalized to `16 kHz / mono / 16-bit PCM WAV` and rejected if it contains static, broadband/high-frequency noise, silence, clipping, excessive duration/rambling, or an exact duplicate. A generation manifest records the planned and accepted provider counts and the applied safety limits.
 
+Qwen3-TTS generates 16 samples per batch by default. On an RTX 3090 that is about 2.7× faster per sample than batches of 4 for under 1 GB more VRAM. Set `-e QWEN_BATCH_SIZE=<n>` to change it: lower it on GPUs with less memory, or try `32` (about 6 GB) for more speed. A batch that fails is retried one sample at a time.
+
 ---
 
 ## Dataset Behavior

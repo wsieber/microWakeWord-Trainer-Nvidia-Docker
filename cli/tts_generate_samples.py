@@ -101,12 +101,49 @@ def log(message: str) -> None:
     print(message, flush=True)
 
 
+# Qwen3-TTS generates short padded batches; on an RTX 3090, batch 16 was ~2.7x
+# faster per sample than 4 for <1 GB more VRAM. QWEN_BATCH_SIZE overrides it.
+DEFAULT_QWEN_BATCH_SIZE = 16
+
+
+def qwen_batch_size(requested: int) -> int:
+    try:
+        configured = int(os.environ.get("QWEN_BATCH_SIZE", DEFAULT_QWEN_BATCH_SIZE))
+    except ValueError:
+        configured = DEFAULT_QWEN_BATCH_SIZE
+    return max(1, min(requested, configured))
+
+
+ACTIVE_MODEL_GROUPS: set[int] = set()
+
+
+def forward_stop_to_model_groups(signum: int, _frame) -> None:
+    """Pass a trainer stop on to model commands running in their own groups."""
+
+    for group in list(ACTIVE_MODEL_GROUPS):
+        try:
+            os.killpg(group, signum)
+        except (ProcessLookupError, PermissionError):
+            pass
+    signal.signal(signum, signal.SIG_DFL)
+    os.kill(os.getpid(), signum)
+
+
 def run(command: list[str], *, env: dict[str, str] | None = None) -> None:
     log("→ " + " ".join(command))
     # Some upstream CLIs terminate their entire process group after a fatal
     # worker error.  Give each model command its own group so that behavior
-    # cannot kill the trainer/orchestrator process.
-    subprocess.run(command, check=True, env=env, start_new_session=True)
+    # cannot kill the trainer/orchestrator process.  Because the trainer stops
+    # runs by signalling its own process group, track these groups so
+    # forward_stop_to_model_groups can stop them too.
+    process = subprocess.Popen(command, env=env, start_new_session=True)
+    ACTIVE_MODEL_GROUPS.add(process.pid)
+    try:
+        returncode = process.wait()
+    finally:
+        ACTIVE_MODEL_GROUPS.discard(process.pid)
+    if returncode != 0:
+        raise subprocess.CalledProcessError(returncode, command)
 
 
 def run_with_batch_retry(
@@ -554,7 +591,7 @@ class Generator:
                 "--output-dir",
                 str(destination),
                 "--batch-size",
-                str(max(1, min(self.args.batch_size, 4))),
+                str(qwen_batch_size(self.args.batch_size)),
             ],
             "--batch-size",
             env=self.env,
@@ -1052,7 +1089,7 @@ class Generator:
                     "--output-dir",
                     str(destination),
                     "--batch-size",
-                    str(max(1, min(self.args.batch_size, 4))),
+                    str(qwen_batch_size(self.args.batch_size)),
                 ],
                 "--batch-size",
                 env=self.env,
@@ -1231,7 +1268,7 @@ class Generator:
                 "--output-dir",
                 str(destination),
                 "--batch-size",
-                str(max(1, min(self.args.batch_size, 4))),
+                str(qwen_batch_size(self.args.batch_size)),
             ]
             run_with_batch_retry(command, "--batch-size", env=self.env)
         elif engine == ENGINE_MOSS:
@@ -1573,6 +1610,8 @@ def parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    for stop_signal in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(stop_signal, forward_stop_to_model_groups)
     args = parser().parse_args()
     args.language = args.language.strip().lower().replace("-", "_")
     args.english_accent = normalize_english_accent(args.english_accent, args.language)
