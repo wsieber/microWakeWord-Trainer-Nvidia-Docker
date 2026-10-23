@@ -268,6 +268,10 @@ The three modern engines deliberately use separate environments under `/data/tts
 
 Add `-e VOXPOPULI=true` to also build English speech negatives from [VoxPopuli](https://huggingface.co/datasets/facebook/voxpopuli) (about 520 hours of parliamentary speech). The 30 source shards total about 99 GB, but they are downloaded, converted to features, and deleted one at a time, so only one ~3.3 GB shard is on disk at once and about 12 GB of features remain in `/data/training_datasets/negative_datasets/voxpopuli`. The first run takes a few hours, mostly downloading; an interrupted run resumes at the first unfinished shard. Training uses the VoxPopuli features whenever they exist, alongside the four stock negative sets.
 
+### Custom negatives from your own audio
+
+Drop any audio file ffmpeg can read (wav, flac, mp3, m4a, webm, opus, ...) into `/data/custom_negatives/`, for example a TV show or a YouTube channel that false-wakes your devices. The next time training datasets are set up, each file is converted to 16 kHz mono and turned into 5 s negative feature windows in `/data/training_datasets/negative_datasets/custom/` (about 0.4 MB per minute of audio). A file is converted once, a changed file is rebuilt, and removing a file deletes its features. Training adds the set when it exists, at `sampling_weight` 4.0; set `-e CUSTOM_NEGATIVE_SAMPLING_WEIGHT=<n>` to change it.
+
 ---
 
 ## Trained Wake Words

@@ -152,6 +152,18 @@ else
   echo "ℹ️  No VoxPopuli negatives found (set VOXPOPULI=true to download them)"
 fi
 
+# Custom negatives are optional: features built by setup_custom_negatives from audio
+# dropped into ${DATA_DIR}/custom_negatives (for example a show that false-wakes a device).
+CUSTOM_NEGATIVE_FEATURES_DIR="${TRAINING_DS}/negative_datasets/custom"
+CUSTOM_NEGATIVE_SAMPLING_WEIGHT="${CUSTOM_NEGATIVE_SAMPLING_WEIGHT:-4.0}"
+HAS_CUSTOM_NEGATIVE="false"
+if compgen -G "${CUSTOM_NEGATIVE_FEATURES_DIR}/training/*_mmap" > /dev/null ; then
+  HAS_CUSTOM_NEGATIVE="true"
+  echo "✅ Found custom negatives: ${CUSTOM_NEGATIVE_FEATURES_DIR}/training (sampling_weight=${CUSTOM_NEGATIVE_SAMPLING_WEIGHT})"
+else
+  echo "ℹ️  No custom negatives found (drop audio files into ${DATA_DIR}/custom_negatives to add some)"
+fi
+
 cd "${WORK_DIR}"
 
 echo "===== Starting ${TRAINING_STEPS} training steps ====="
@@ -176,6 +188,7 @@ features:
 __PERSONAL_FEATURE_MARKER__
 __REVIEWED_NEGATIVE_FEATURE_MARKER__
 __VOXPOPULI_FEATURE_MARKER__
+__CUSTOM_NEGATIVE_FEATURE_MARKER__
 - features_dir: __NEG_SPEECH__
   penalty_weight: 1.0
   sampling_weight: 12.0
@@ -281,6 +294,22 @@ EOF
   perl -0777 -i -pe "s#__VOXPOPULI_FEATURE_MARKER__#${voxpopuli_block}#g" "${YAML_PATH}"
 else
   sed -i -e "/__VOXPOPULI_FEATURE_MARKER__/d" "${YAML_PATH}"
+fi
+
+# Insert/remove custom negative block
+if [ "${HAS_CUSTOM_NEGATIVE}" = "true" ]; then
+  custom_negative_block="$(cat <<EOF
+- features_dir: ${CUSTOM_NEGATIVE_FEATURES_DIR}
+  penalty_weight: 1.0
+  sampling_weight: ${CUSTOM_NEGATIVE_SAMPLING_WEIGHT}
+  truncation_strategy: random
+  truth: false
+  type: mmap
+EOF
+)"
+  perl -0777 -i -pe "s#__CUSTOM_NEGATIVE_FEATURE_MARKER__#${custom_negative_block}#g" "${YAML_PATH}"
+else
+  sed -i -e "/__CUSTOM_NEGATIVE_FEATURE_MARKER__/d" "${YAML_PATH}"
 fi
 
 echo "   Wrote training_parameters.yaml"
